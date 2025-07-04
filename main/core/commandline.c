@@ -520,15 +520,39 @@ void handle_ble_scan_cmd(int argc, char **argv) {
 #endif
 
 void handle_start_portal(int argc, char **argv) {
-    if (argc < 3 || argc > 4) { // Accept 3 or 4 arguments
-        printf("Usage: %s <FilePath> <AP_SSID> [PSK]\n", argv[0]);
-        TERMINAL_VIEW_ADD_TEXT("Usage: %s <FilePath> <AP_SSID> [PSK]\n", argv[0]);
-        TERMINAL_VIEW_ADD_TEXT("PSK is optional for an open AP.\n");
+    /* Accept syntax:
+     *   startportal [online|offline] <PathOrURL> <AP_SSID> [PSK]
+     * If the first parameter is not a mode keyword we assume offline (legacy).
+     */
+
+    bool is_online = false;
+    const char *url;
+    const char *ap_ssid;
+    const char *psk = ""; // default
+
+    if (argc < 3) {
+        printf("Usage: %s [online|offline] <PathOrURL> <AP_SSID> [PSK]\n", argv[0]);
+        TERMINAL_VIEW_ADD_TEXT("Usage: %s [online|offline] <PathOrURL> <AP_SSID> [PSK]\n", argv[0]);
         return;
     }
-    const char *url = argv[1];
-    const char *ap_ssid = argv[2];
-    const char *psk = (argc == 4) ? argv[3] : ""; // Set PSK to empty if not provided
+
+    int idx = 1;
+    if (strcmp(argv[1], "online") == 0 || strcmp(argv[1], "offline") == 0) {
+        is_online = (strcmp(argv[1], "online") == 0);
+        idx++; // Path/URL starts at next arg
+        if (argc - idx < 2) {
+            printf("Usage: %s [online|offline] <PathOrURL> <AP_SSID> [PSK]\n", argv[0]);
+            TERMINAL_VIEW_ADD_TEXT("Usage: %s [online|offline] <PathOrURL> <AP_SSID> [PSK]\n", argv[0]);
+            return;
+        }
+    }
+
+    url = argv[idx];
+    ap_ssid = argv[idx + 1];
+    if (argc > idx + 2) {
+        psk = argv[idx + 2];
+    }
+
     if (strlen(url) >= MAX_PORTAL_PATH_LEN) {
         printf("Error: Provided Path is too long.\n");
         TERMINAL_VIEW_ADD_TEXT("Error: Path too long.\n");
