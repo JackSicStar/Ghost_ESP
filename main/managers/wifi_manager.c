@@ -631,13 +631,18 @@ esp_err_t stream_data_to_client(httpd_req_t *req, const char *url, const char *c
             .url = url,
             .timeout_ms = 5000,
             .crt_bundle_attach = esp_crt_bundle_attach,
-            .transport_type = HTTP_TRANSPORT_OVER_SSL,
-            .user_agent = "Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) "
-                          "AppleWebKit/537.36 (KHTML, like "
-                          "Gecko) SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile "
-                          "Safari/537.36", // Browser-like
-                                           // User-Agent
-                                           // string
+            /*
+             * For plain-HTTP URLs we must use the TCP transport, while HTTPS
+             * requires the SSL transport.  Attempting to speak TLS to an
+             * "http://" origin causes the connection to fail and previously
+             * broke online Evil Portal functionality.
+             */
+            .transport_type = (strncmp(url, "https://", 8) == 0)
+                                 ? HTTP_TRANSPORT_OVER_SSL
+                                 : HTTP_TRANSPORT_OVER_TCP,
+            .user_agent = "Mozilla/5.0 (Linux; Android 11; SM-G973U) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.141 "
+                          "Mobile Safari/537.36",
             .disable_auto_redirect = false,
         };
 
